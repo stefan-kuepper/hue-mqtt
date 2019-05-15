@@ -29,7 +29,8 @@ class HueMqttServer:
     status = {}
     status_lights = {}
     status_groups = {}
-    
+    status_sensors = {}
+
     bridge_worker = None
     bridge_timer = None
     poll_time=1
@@ -202,6 +203,53 @@ class HueMqttServer:
                 logger.debug('Status of group "' + api['groups'][group_id]['name'] + '" changed')
                 self.status_groups[group_id] = state
                 self.mqtt_client.publish(topic_prefix, state, 0 , True)
+        for sensor_id in api['sensors']:
+            sensor = api['sensors'][sensor_id]
+            state = {}
+            if 'state' in sensor:
+                state['state'] = sensor['state']
+            if 'name' in sensor:
+                state['name'] = sensor['name']
+            if 'manufacturername' in sensor:
+                state['manufacturername'] = sensor['manufacturername']
+            if 'modelid' in sensor:
+                state['modelid'] = sensor['modelid']
+            if 'battery' in sensor['config']:
+                state['battery'] = sensor['config']['battery']
+            
+            if sensor['type'] == 'ZHASwitch':
+                state['val'] = sensor['state']['buttonevent']
+            elif sensor['type'] == 'Daylight':
+                val = sensor['state']['daylight']
+            else:
+                logger.warn("Unknown sensor type")
+                state['val'] = -1
+                
+            if sensor_id not in self.status_sensors:
+                logger.info('Discovered new sensor: ' + str(state))
+                self.status_sensors[sensor_id] = {}
+                self.status_sensors[sensor_id]['ts'] = int(time.time()*1000)
+            
+            changed = False
+            for key in state:
+                if key not in self.status_sensors[sensor_id]:
+                    changed = True
+                    break
+                elif state[key] != self.status_sensors[sensor_id][key]:
+                    changed = True
+                    break
+    
+            if changed:
+                logger.debug('Status of sensor "' + sensor['name'] + '" changed')
+                #import pdb;pdb.set_trace()
+                state['lc'] = self.status_sensors[sensor_id]['ts']
+                state['ts'] = int(time.time()*1000)
+                
+                self.status_sensors[sensor_id] = state
+                topic_prefix = ( self.config['mqtt_topic_prefix'] 
+                                 + '/status/sensor/' + sensor['name'] )
+                msg = json.dumps(state)
+                self.mqtt_client.publish(topic_prefix, msg, 0 , True)
 
     def start(self):
         self.mqtt_connect()
