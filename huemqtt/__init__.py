@@ -27,9 +27,6 @@ class HueMqttServer:
     mqtt_connected = False
     mqtt_client = None
     status = { 'groups': {}, 'lights': {}, 'sensors':{}}
-    status_lights = {}
-    status_groups = {}
-    status_sensors = {}
 
     bridge_worker = None
     bridge_timer = None
