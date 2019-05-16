@@ -189,12 +189,47 @@ class HueMqttServer:
     def publish_status(self):
         api=self.bridge.get_api()
         for light_id in api['lights']:
-            topic_prefix = self.config['mqtt_topic_prefix'] + '/status/light/' + api['lights'][light_id]['name']
-            state = json.dumps({"val": api['lights'][light_id]['state']['bri'],"state": api['lights'][light_id]['state']})
-            if light_id not in self.status_lights or self.status_lights[light_id] != state:
-                logger.debug('Status of light "' + api['lights'][light_id]['name'] + '" changed')
+            light = api['lights'][light_id]
+            state = {}
+            if 'state' in light:
+                state['state'] = light['state']
+                state['val'] = light['state']['bri']
+            if 'manufacturername' in light:
+                state['manufacturername'] = light['manufacturername']
+            if 'modelid' in light:
+                state['modelid'] = light['modelid']
+            if 'name' in light:
+                state['name'] = light['name']
+            if 'type' in light:
+                state['type'] = light['type']
+            if 'uniqueid' in light:
+                state['uniqueid'] = light['uniqueid']
+
+            if light_id not in self.status_lights:
+                logger.info('Discovered new light: ' + str(state))
+                self.status_lights[light_id] = {}
+                self.status_lights[light_id]['ts'] = int(time.time()*1000)
+            
+            changed = False
+            for key in state:
+                if key not in self.status_lights[light_id]:
+                    changed = True
+                    break
+                elif state[key] != self.status_lights[light_id][key]:
+                    changed = True
+                    break
+    
+            if changed:
+                logger.debug('Status of light "' + light['name'] + '" changed')
+                #import pdb;pdb.set_trace()
+                state['lc'] = self.status_lights[light_id]['ts']
+                state['ts'] = int(time.time()*1000)
+                
                 self.status_lights[light_id] = state
-                self.mqtt_client.publish(topic_prefix, state, 0 , True)
+                topic_prefix = ( self.config['mqtt_topic_prefix'] 
+                                 + '/status/light/' + light['name'] )
+                msg = json.dumps(state)
+                self.mqtt_client.publish(topic_prefix, msg, 0 , True)
 
         for group_id in api['groups']:
             topic_prefix = self.config['mqtt_topic_prefix'] + '/status/group/' + api['groups'][group_id]['name']
