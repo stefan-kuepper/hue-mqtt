@@ -5,6 +5,7 @@ import traceback
 import queue
 import logging
 import json
+import websocket
 import paho.mqtt.client as mqtt
 from threading import Thread
 from threading import Timer
@@ -26,11 +27,14 @@ class HueMqttServer:
     bridge = None
     mqtt_connected = False
     mqtt_client = None
-    status = { 'groups': {}, 'lights': {}, 'sensors':{}}
+    status = { 'groups': {}, 'lights': {}, 'sensors':{}, 'scenes':{}}
 
     bridge_worker = None
     bridge_timer = None
-    poll_time=1
+    poll_time=60
+    
+    ws = None
+    ws_worker = None
     
     class BridgeThread(Thread):
         bridge_queue = queue.Queue()
@@ -171,9 +175,39 @@ class HueMqttServer:
             logger.info('Bridge connected!')
             if self.bridge_timer:
                 self.bridge_timer.cancel()
-
+            
+            if 'websocketport' in response['config']:
+                websocket.enableTrace(True)
+                ws = websocket.WebSocketApp("ws://{}:{}/".format(
+                                        self.config['bridge_ip'],
+                                        response['config']['websocketport']),
+                              on_message = self.ws_on_message)
+                              #on_error = on_error,
+                              #on_close = on_close)
+                ws_worker = Thread(target = ws.run_forever, 
+                            name = "websocket", daemon = True)
+                ws_worker.start()
+            
             self.update_bridge()
             self.mqtt_client.publish(self.config['mqtt_topic_prefix'] + "/connected", "2", 1, True)
+            
+    def ws_on_message(self, message):
+        logger.debug("Recieved WS message: {}".format(message))
+        # Update device
+        msg = json.loads(message)
+        if msg['e'] == 'changed':
+            dev = self.status[msg['r']][msg['id']]
+            if 'state' in msg:
+                ts = int(time.time()*1000)
+                dev['state'] = msg['state']
+                dev['val'] = self._get_val(msg['r'], dev['type'], 
+                                                 dev['state'])
+                dev['lc'] = dev['ts']
+                dev['ts'] = ts
+                topic_prefix = ( self.config['mqtt_topic_prefix'] 
+                                 + '/status/' + msg['r'] + '/' + dev['name'] )
+                msg = json.dumps(dev)
+                self.mqtt_client.publish(topic_prefix, msg, 0 , True)
         
     def update_bridge(self):
         logger.debug('Bridge update')
@@ -182,6 +216,28 @@ class HueMqttServer:
         self.publish_status()
         self.bridge_timer = Timer(self.poll_time, self.update_bridge)
         self.bridge_timer.start()
+    
+    def _get_val(self, res, _type, state):
+        val = -1
+        if res == 'lights':
+            val = state['bri']
+        elif res == 'groups':
+            if state['any_on']:
+                if state['all_on']:
+                    val = "all_on"
+                else:
+                    val = "any_on"
+            else:
+                val = "none_on"
+        elif res == 'sensors':
+            if _type == 'ZHASwitch':
+                val = state['buttonevent']
+            elif _type == 'Daylight':
+                val = state['daylight']
+            else:
+                logger.warn("Unknown sensor type")
+        
+        return val
 
     def publish_status(self):
         api=self.bridge.get_api()
@@ -198,7 +254,8 @@ class HueMqttServer:
                             continue
                     else:
                         state['etag'] = dev['etag']
-    
+                ts = int(time.time()*1000)
+                
                 if 'manufacturername' in dev:
                     state['manufacturername'] = dev['manufacturername']
                 if 'modelid' in dev:
@@ -211,38 +268,21 @@ class HueMqttServer:
                     state['uniqueid'] = dev['uniqueid']
                 if 'state' in dev:
                     state['state'] = dev['state']
+                    state['val'] = self._get_val(res, state['type'], 
+                                                 dev['state'])
                     
-                    if res == 'lights':
-                        state['val'] = state['state']['bri']
-                    elif res == 'groups':
-                        if state['state']['any_on']:
-                            if state['state']['all_on']:
-                                state['val'] = "all_on"
-                            else:
-                                state['val'] = "any_on"
-                        else:
-                            state['val'] = "none_on"
-                    
-                    elif res == 'sensors':
-                        if dev['type'] == 'ZHASwitch':
-                            state['val'] = dev['state']['buttonevent']
-                        elif dev['type'] == 'Daylight':
-                            state['val'] = dev['state']['daylight']
-                        else:
-                            logger.warn("Unknown sensor type")
-                            state['val'] = -1
                 
                 if dev_id not in self.status[res]:
                     logger.info('Discovered new ' + state['type'] 
                                 + ': ' + str(state))
                     self.status[res][dev_id] = {}
-                    self.status[res][dev_id]['ts'] = int(time.time()*1000)
+                    self.status[res][dev_id]['ts'] = ts
             
     
                 logger.debug('Status of device "' + dev['name'] + '" changed')
                 #import pdb;pdb.set_trace()
                 state['lc'] = self.status[res][dev_id]['ts']
-                state['ts'] = int(time.time()*1000)
+                state['ts'] = ts
                 
                 self.status[res][dev_id] = state
                 topic_prefix = ( self.config['mqtt_topic_prefix'] 
