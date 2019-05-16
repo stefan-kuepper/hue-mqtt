@@ -83,10 +83,12 @@ class HueMqttServer:
         
     def mqtt_on_connect(self, mqtt_client, userdata, flags, rc):
         logger.info('...mqtt_connected!')
-        result, mid = self.mqtt_client.subscribe(self.config['mqtt_topic_prefix'] + '/command/#')
-        logger.info('Subscribe to: ' + self.config['mqtt_topic_prefix'] + '/command/# Message id=' + str(mid))
-        result,mid = self.mqtt_client.subscribe(self.config['mqtt_topic_prefix'] + '/set/#')
-        logger.info('Subscribe to: ' + self.config['mqtt_topic_prefix'] + '/set/# Message id=' + str(mid))
+        self.mqtt_client.subscribe(self.config['mqtt_topic_prefix'] + '/get/#')
+        self.mqtt_client.message_callback_add(self.config['mqtt_topic_prefix'] + '/get/#', self.mqtt_on_message_get)
+        self.mqtt_client.subscribe(self.config['mqtt_topic_prefix'] + '/set/#')
+        self.mqtt_client.message_callback_add(self.config['mqtt_topic_prefix'] + '/set/lights/#', self.mqtt_on_message_set_light)
+        self.mqtt_client.subscribe(self.config['mqtt_topic_prefix'] + '/command/#')
+        self.mqtt_client.message_callback_add(self.config['mqtt_topic_prefix'] + '/command/#', self.mqtt_on_message_command)
 
         self.mqtt_client.publish(self.config['mqtt_topic_prefix'] + "/connected", "1", 1, True)
         self.bridge_worker.bridge_queue.put(Thread(target=self.bridge_connect))
@@ -100,60 +102,66 @@ class HueMqttServer:
             while not self.mqtt_broker_reachable():
                 time.sleep(10)
             self.mqtt_client.reconnect()
-
+            
+    def mqtt_on_message_get(self, client, userdata, message):
+        topic = message.topic.split("/")
+        if topic[2] in self.status:
+            for dev in self.status[topic[2]]:
+                if self.status[topic[2]][dev]['name'] == topic[3]:
+                    logger.info("Get request for {} recieved".format(
+                                topic[3]))
+                    topic_prefix = "{}/{}/{}/{}".format(
+                            self.config['mqtt_topic_prefix'],
+                            'status', topic[2], topic[3] )
+                    msg = json.dumps(self.status[topic[2]][dev])
+                    self.mqtt_client.publish(topic_prefix, msg, 0 , True)
+                    break
+                    
+    def mqtt_on_message_set_light(self, client, userdata, message):  
+        topic = message.topic.split("/")
+        payload = json.loads(message.payload.decode("utf-8"))
+        light = self.bridge.get_light(topic[3]) 
+        if light:
+            if len(topic) == 4 or (len(topic) == 5 and topic[4]) == '':
+               # hue/set/light/*name* or hue/set/light/*name*/
+               import pdb;pdb.set_trace()
+               self.BridgeThread.bridge_queue.put(
+                        Thread(
+                            target=self.bridge.set_light, 
+                            args=(topic[3], payload)))
+            elif len(topic) == 5:
+                value = None
+                if topic[4] == "on": 
+                    #import pdb;pdb.set_trace()
+                    if payload.lower() in ("0","false","off"):
+                        value = False
+                    elif payload.lower() in ("1","true","on"):
+                        value = True
+                elif topic[4] in ("bri", "ct", "sat", "hue"):
+                    value = int(message.payload)
+                
+                if(value != None):
+                    logger.info('Set light "' + topic[3] + '" ' + topic[4] + ' to ' + str(value))
+                    self.BridgeThread.bridge_queue.put(Thread(target=self.bridge.set_light, args=(light['name'], topic[4], value)))
+                else:
+                    logger.warn('Wrong value for light "' + topic[3] + "/" + topic[4] + '" : ' + payload)
+                        
+    def mqtt_on_message_command(self,client, userdata, message):
+        topic = message.topic.split("/")
+        if topic[2] == "scan_sensors":
+            logger.info("Scanning for new sensors")
+            self.BridgeThread.bridge_queue.put(
+                    Thread(target=self.bridge.scan_sensors))
+        elif topic[2] == "scan_lights":
+            logger.info("Scanning for new lights")
+            self.BridgeThread.bridge_queue.put(
+                    Thread(target=self.bridge.scan_sensors))
+    
     def mqtt_on_message(self, client, userdata, message):
         topic = message.topic
         payload = message.payload.decode("utf-8")
         logger.info("MQTT message: " + topic  + ": " + payload)
-        '''
-        Possible groups:
-        /set/light/*name*/
-        /set/light/*name*/on
-        /set/light/*name*/bri
-        /set/light/*name/ct
-        ''' 
-        if self.bridge:
-            topic = topic.split("/")
-            if topic[1] == "set":
-                if topic[2] == "light":
-                    light = self.bridge.get_light(topic[3]) 
-                    if light:
-                        if len(topic) == 4 or (len(topic) == 5 and topic[4]) == '':
-                           # /set/light/*name*
-                           pass
-                        elif len(topic) == 5:
-                            value = None
-                            if topic[4] == "on": 
-                                #import pdb;pdb.set_trace()
-                                if payload.lower() in ("0","false","off"):
-                                    value = False
-                                elif payload.lower() in ("1","true","on"):
-                                    value = True
-                            elif topic[4] in ("bri", "ct", "sat"):
-                                value = int(message.payload)
-                            
-                            if(value != None):
-                                logger.info('Set light "' + topic[3] + '" ' + topic[4] + ' to ' + str(value))
-                                self.BridgeThread.bridge_queue.put(Thread(target=self.bridge.set_light, args=(light['name'], topic[4], value)))
-                                #self.bridge.set_light(light['name'], topic[4], value)
-                                self.BridgeThread.bridge_queue.put(Thread(target=self.update_bridge))
-                                #self.update_bridge():
-                            else:
-                                logger.warn('Wrong value for light "' + topic[3] + "/" + topic[4] + '" : ' + payload)
-                                
-                elif topic[2] == "groups":
-                    logger.warn('Groups not implemented')
-                    # TODO: Implement groups 
-            elif topic[1] == "command":
-                if topic[2] == "scan_sensors":
-                    logger.info("Scanning for new sensors")
-                    self.BridgeThread.bridge_queue.put(Thread(target=self.bridge.scan_sensors))
-                elif topic[2] == "scan_lights":
-                    logger.info("Scanning for new lights")
-                    self.BridgeThread.bridge_queue.put(Thread(target=self.bridge.scan_sensors))
-            #logger.info(message.topic + ': ' + str(float(message.payload)))
-            #self.bridge_queue.put(Thread(target=self. .set_target_temperature,
-             #                          args=(self.device_mapping[message.topic], float(message.payload))))
+
 
     def mqtt_broker_reachable(self):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -177,7 +185,6 @@ class HueMqttServer:
                 self.bridge_timer.cancel()
             
             if 'websocketport' in response['config']:
-                websocket.enableTrace(True)
                 ws = websocket.WebSocketApp("ws://{}:{}/".format(
                                         self.config['bridge_ip'],
                                         response['config']['websocketport']),

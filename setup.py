@@ -19,6 +19,6 @@ setup(
     license=license,
     py_modules=['huemqtt'],
 #    include_package_data=True,
-    install_requires=['phue', 'paho-mqtt'],
+    install_requires=['phue', 'paho-mqtt', 'websocket_client'],
     scripts=['bin/hue-mqtt']
 )
