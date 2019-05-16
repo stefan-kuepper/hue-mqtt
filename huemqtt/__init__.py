@@ -26,7 +26,7 @@ class HueMqttServer:
     bridge = None
     mqtt_connected = False
     mqtt_client = None
-    status = {}
+    status = { 'groups': {}, 'lights': {}, 'sensors':{}}
     status_lights = {}
     status_groups = {}
     status_sensors = {}
@@ -188,103 +188,71 @@ class HueMqttServer:
 
     def publish_status(self):
         api=self.bridge.get_api()
-        for light_id in api['lights']:
-            light = api['lights'][light_id]
-            state = {}
-            if 'state' in light:
-                state['state'] = light['state']
-                state['val'] = light['state']['bri']
-            if 'manufacturername' in light:
-                state['manufacturername'] = light['manufacturername']
-            if 'modelid' in light:
-                state['modelid'] = light['modelid']
-            if 'name' in light:
-                state['name'] = light['name']
-            if 'type' in light:
-                state['type'] = light['type']
-            if 'uniqueid' in light:
-                state['uniqueid'] = light['uniqueid']
-
-            if light_id not in self.status_lights:
-                logger.info('Discovered new light: ' + str(state))
-                self.status_lights[light_id] = {}
-                self.status_lights[light_id]['ts'] = int(time.time()*1000)
-            
-            changed = False
-            for key in state:
-                if key not in self.status_lights[light_id]:
-                    changed = True
-                    break
-                elif state[key] != self.status_lights[light_id][key]:
-                    changed = True
-                    break
+        for res in ('groups', 'lights', 'sensors'):
+            for dev_id in api[res]:
+                dev = api[res][dev_id]
+                state = {}
+                
+                if 'etag' in dev:
+                    if (dev_id in self.status[res]
+                        and 'etag' in self.status[res][dev_id]
+                        and self.status[res][dev_id]['etag'] == dev['etag']):
+                            # device has not changed
+                            continue
+                    else:
+                        state['etag'] = dev['etag']
     
-            if changed:
-                logger.debug('Status of light "' + light['name'] + '" changed')
+                if 'manufacturername' in dev:
+                    state['manufacturername'] = dev['manufacturername']
+                if 'modelid' in dev:
+                    state['modelid'] = dev['modelid']
+                if 'name' in dev:
+                    state['name'] = dev['name']
+                if 'type' in dev:
+                    state['type'] = dev['type']
+                if 'uniqueid' in dev:
+                    state['uniqueid'] = dev['uniqueid']
+                if 'state' in dev:
+                    state['state'] = dev['state']
+                    
+                    if res == 'lights':
+                        state['val'] = state['state']['bri']
+                    elif res == 'groups':
+                        if state['state']['any_on']:
+                            if state['state']['all_on']:
+                                state['val'] = "all_on"
+                            else:
+                                state['val'] = "any_on"
+                        else:
+                            state['val'] = "none_on"
+                    
+                    elif res == 'sensors':
+                        if dev['type'] == 'ZHASwitch':
+                            state['val'] = dev['state']['buttonevent']
+                        elif dev['type'] == 'Daylight':
+                            state['val'] = dev['state']['daylight']
+                        else:
+                            logger.warn("Unknown sensor type")
+                            state['val'] = -1
+                
+                if dev_id not in self.status[res]:
+                    logger.info('Discovered new ' + state['type'] 
+                                + ': ' + str(state))
+                    self.status[res][dev_id] = {}
+                    self.status[res][dev_id]['ts'] = int(time.time()*1000)
+            
+    
+                logger.debug('Status of device "' + dev['name'] + '" changed')
                 #import pdb;pdb.set_trace()
-                state['lc'] = self.status_lights[light_id]['ts']
+                state['lc'] = self.status[res][dev_id]['ts']
                 state['ts'] = int(time.time()*1000)
                 
-                self.status_lights[light_id] = state
+                self.status[res][dev_id] = state
                 topic_prefix = ( self.config['mqtt_topic_prefix'] 
-                                 + '/status/light/' + light['name'] )
+                                 + '/status/' + res + '/' + dev['name'] )
                 msg = json.dumps(state)
                 self.mqtt_client.publish(topic_prefix, msg, 0 , True)
 
-        for group_id in api['groups']:
-            topic_prefix = self.config['mqtt_topic_prefix'] + '/status/group/' + api['groups'][group_id]['name']
-            state = json.dumps({"val": api['groups'][group_id]['action']['bri'],"id": api['groups'][group_id]['action'],"state": api['groups'][group_id]['state']})
-            if group_id not in self.status_groups or self.status_groups[group_id] != state:
-                logger.debug('Status of group "' + api['groups'][group_id]['name'] + '" changed')
-                self.status_groups[group_id] = state
-                self.mqtt_client.publish(topic_prefix, state, 0 , True)
-        for sensor_id in api['sensors']:
-            sensor = api['sensors'][sensor_id]
-            state = {}
-            if 'state' in sensor:
-                state['state'] = sensor['state']
-            if 'name' in sensor:
-                state['name'] = sensor['name']
-            if 'manufacturername' in sensor:
-                state['manufacturername'] = sensor['manufacturername']
-            if 'modelid' in sensor:
-                state['modelid'] = sensor['modelid']
-            if 'battery' in sensor['config']:
-                state['battery'] = sensor['config']['battery']
-            
-            if sensor['type'] == 'ZHASwitch':
-                state['val'] = sensor['state']['buttonevent']
-            elif sensor['type'] == 'Daylight':
-                val = sensor['state']['daylight']
-            else:
-                logger.warn("Unknown sensor type")
-                state['val'] = -1
-                
-            if sensor_id not in self.status_sensors:
-                logger.info('Discovered new sensor: ' + str(state))
-                self.status_sensors[sensor_id] = {}
-                self.status_sensors[sensor_id]['ts'] = int(time.time()*1000)
-            
-            changed = False
-            for key in state:
-                if key not in self.status_sensors[sensor_id]:
-                    changed = True
-                    break
-                elif state[key] != self.status_sensors[sensor_id][key]:
-                    changed = True
-                    break
-    
-            if changed:
-                logger.debug('Status of sensor "' + sensor['name'] + '" changed')
-                #import pdb;pdb.set_trace()
-                state['lc'] = self.status_sensors[sensor_id]['ts']
-                state['ts'] = int(time.time()*1000)
-                
-                self.status_sensors[sensor_id] = state
-                topic_prefix = ( self.config['mqtt_topic_prefix'] 
-                                 + '/status/sensor/' + sensor['name'] )
-                msg = json.dumps(state)
-                self.mqtt_client.publish(topic_prefix, msg, 0 , True)
 
     def start(self):
         self.mqtt_connect()
